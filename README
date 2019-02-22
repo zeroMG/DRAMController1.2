@@ -1,0 +1,43 @@
+
+
+Usage:
+-t memory trace list that assigned to each requestor
+-s memory controller system employed
+-C number of channels running in parallel
+-R number of ranks in a memory channel
+-G memory device generation: DDR3
+-D memory device speed: 1600H
+-S memory device size: 2Gb_x8
+-n number of requestors target to the memory system
+-c number of cycles for simulation
+
+
+./DRAMController -t Mem_Trace/a2time.trc -s system/PipeCAS/PipeCAS.ini -c 0 -n 16 -R 1 -D 1600H
+
+./DRAMController -t Mem_Trace/a2time.trc -s system/Round/Round.ini -c 0 -n 16 -R 1 -D 1600H
+
+Note:
+Manual Configuration
+    Since the sample memory traces are generated without considering allocating to individual rank and bank, 
+    the user must manually reconfigure the address location in the AddressMapping class.
+    The configuration is done through MAKEFILE compile options
+
+    1. Interleaved controller (AMC, RTMem, PMC)
+        Normal translation based on the defined bits order
+            Disable all privatization options
+
+    2. Single rank bank privatized controller (ORP, DCmc, MAG, PipeCAS, ReOrder)
+        After normal translation, change the bank to match requestor ID. 
+        This ensures that each requestor is isolated
+            Enable -DSINGLE_RANK_BANK_PRIVATIZATION
+
+    2. Multiple Rank Bank Privatized Controller (ROC, MCMC)
+        After normal translation, change the rank and bank accordingly based on the requestor ID.
+        This ensures that each requestor is allocated to isolated rank and bank
+            Enable -DMULTI_RANK_BANK_PRIVATIZATION
+
+The requestor criticality also requires manual assignment in the main.cpp, as well as request size
+    Exmaple: for each requestor, there are three parameters
+        bool inOrder = true;        // If the requestor is executing memory request in order
+        bool isHRT = true;          // If the requestor is more critical than the others
+        int requestSize = 64;       // Size of the memory request

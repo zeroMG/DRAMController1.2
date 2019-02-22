@@ -1,0 +1,1297 @@
+	/*********************************************************************************
+	*  Copyright (c) 2018-2019, 
+	*  Reza Mirosanlou
+	*  University of Waterloo               
+	*  All rights reserved.
+	*********************************************************************************/
+
+	#include "../../CommandScheduler.h"
+
+	namespace DRAMController
+	{
+		class CommandScheduler_Round: public CommandScheduler
+		{
+		private:
+			//vector<pair<BusPacket*, unsigned int>> cmdFIFO;	// FIFO contains ready commands and queue index
+			vector<unsigned int> Order;
+			int  servicebuffer[16];
+			int  consideredScheduled[16];
+			// Pending Command indicator based on requestorID
+			std::map<unsigned int, bool> queuePending;
+			std::map<unsigned int, BusPacket*> tempqueue;
+			unsigned int counter;
+			bool roundType; // true = Read and false = write
+			bool skipCAS;
+			bool cycleDone;
+			bool currRound;
+			int lastACT;
+			int lastCAS;
+			unsigned int expectCAS;
+			unsigned int countFAW;
+			unsigned int countACT;
+			unsigned int countCAS;
+			unsigned int swCAS;
+			unsigned int swACT;
+			unsigned int predictACT;
+			bool blockACT;
+			bool jump_1;
+			bool jump_2;
+			bool first;
+			unsigned int tCCD;
+			unsigned int tRTR;
+			unsigned int tRCD;
+			unsigned int tFAW;
+			unsigned int tRRD;
+			unsigned int tRTW;
+			unsigned int tWL;
+			unsigned int tWTR;
+			unsigned int tBUS;
+			unsigned int tWtoR;
+
+		public:
+			CommandScheduler_Round(vector<CommandQueue*>& commandQueues, const map<unsigned int, bool>& requestorTable):
+				CommandScheduler(commandQueues, requestorTable)
+			{
+				counter = 0;
+				roundType = true; // true = Read and false = write
+				skipCAS = false;
+				cycleDone = false;
+				currRound = 0;
+				lastACT = 0;
+				countFAW = 0;
+				blockACT = false;
+				swCAS = tCCD;
+				
+				
+				for (unsigned int i = 0 ; i < 8 ; i++)
+				{
+					servicebuffer[i] = 0;
+				}
+				for (unsigned int i = 0; i < 8; i++)
+				{
+					consideredScheduled[i] = 0;
+				}
+				for (unsigned int i = 0; i < 8; i++)
+				{
+					Order.push_back(i);
+				}
+			}
+
+			~CommandScheduler_Round()
+			{
+				tempqueue.clear();
+				Order.clear();
+				queuePending.clear();
+				// for (unsigned int i = 0; i < tempqueue.size(); i++)
+				// {
+				// 	consideredScheduled[i] = 0;
+				// }
+				// queuePending.clear();
+				// tempqueue.clear();
+				
+				// for (unsigned int i = 0 ; i < tempqueue.size() ; i++)
+				// {
+				// 	servicebuffer[i] = 0;
+				// }
+			}
+
+			BusPacket* commandSchedule()
+			{
+					
+				scheduledCommand = NULL;
+				tCCD = getTiming("tCCD");
+				//cout<<"tCCD   "<<tCCD<<endl;
+				tRRD = getTiming("tRRD");
+				//cout<<"tRRD   "<<tRRD<<endl;
+				tRCD = getTiming("tRCD");
+				//cout<<"tRCD   "<<tRCD<<endl;
+				tFAW = getTiming("tFAW");
+				//cout<<"tFAW   "<<tFAW<<endl;
+				tRTW = getTiming("tRTW");
+				//cout<<"tRTW   "<<tRTW<<endl;
+				tWL  = getTiming("tWL");
+				//cout<<"tWL   "<<tWL<<endl;
+				tWTR = getTiming("tWTR"); 
+				//cout<<"tWTR   "<<tWTR<<endl;
+				tBUS = getTiming("tBUS"); // this is still 0????
+				//cout<<"tBUS   "<<tBUS<<endl;
+				tWtoR = tWL + tBUS + tWTR;
+				checkCommand = NULL;
+				checkCommand_1 = NULL;
+				count_ACT = false;
+				count_CAS = false;
+				
+				//Constructing the intra-ready tempqueue here!
+
+				for(unsigned int index = 0; index < commandQueue.size(); index++)
+				{				
+					// PerRequestor is enabled and there is some requestors in this memory level
+					if(commandQueue[index]->isPerRequestor()) 
+					{
+						if(commandQueue[index]->getRequestorIndex() > 0) // there is more than 0 requestor in the design
+						{
+							for(unsigned int num = 0; num < commandQueue[index]->getRequestorIndex(); num++) // for all requestors from "num". getRequestorIndex() gives the number of requestors
+							{
+								if(commandQueue[index]->getRequestorSize(num) > 0 ) //return the buffer size of the requestor
+								{
+									
+									checkCommand = commandQueue[index]->getRequestorCommand(num);
+									//cout << checkCommand->busPacketType<<endl;
+									if(queuePending.find(checkCommand->requestorID) == queuePending.end()) 
+									{
+										
+										queuePending[checkCommand->requestorID] = false;
+										
+									}
+									if(queuePending[checkCommand->requestorID] == false && isReady(checkCommand, index)) 
+									{		
+														
+										tempqueue[checkCommand->requestorID]= checkCommand;														
+										queuePending[checkCommand->requestorID] = true;
+									}
+									checkCommand = NULL;
+								}
+							}
+						}	
+					}		
+				}
+				
+
+				
+				//Switch and Reset rules to be here
+				//Basically the switch rule only works when we reach the counter and then check whether we have ACT/CAS from the other type or not
+				
+
+
+				// needs thinking
+				/*
+				if(counter == swACT)
+				{
+					//cout<<"default value"<<swACT<<endl;
+					//cout<<"TEST to BE HERE"<<endl;
+					for(unsigned int num=0; num<tempqueue.size(); num++) // for all requestors from "num". getRequestorIndex() gives the number of requestors
+					{						
+						checkCommand = tempqueue[num];
+						if (roundType == true)
+						{
+							if (checkCommand->busPacketType == ACT_R) 
+							{
+								if(isIssuable(checkCommand))
+								{	
+									if(servicebuffer[num] == 0)
+									{
+										if(consideredScheduled[num] == 0)
+										{
+											count_ACT = true;
+										}		
+									}					
+								}
+							}		
+						}
+						else if (roundType == false)
+						{
+							if (checkCommand->busPacketType == ACT_W) 
+							{
+								if(isIssuable(checkCommand))
+								{	
+									if(servicebuffer[num] == 0)
+									{	
+										if(consideredScheduled[num] == 0)
+										{
+											count_ACT = true;
+										}
+									}		
+								}	
+							}		
+						}
+					}			
+					if(!count_ACT)
+					{
+						blockACT = true;
+					}					
+				}
+				*/
+
+					//this part can be used for the situation where we reach to the sw point but we are not done!
+				if (counter == swCAS)
+				{ 	
+					cout<<" the counter when reach to SW point is   "<<counter<<endl;
+					
+					// for(unsigned int num = 0; num < tempqueue.size(); num++) // for all requestors from "num". getRequestorIndex() gives the number of requestors
+					// {	
+					for(std::map<unsigned int, BusPacket*>::iterator it=tempqueue.begin(); it!=tempqueue.end(); ++it) // for all requestors from "num". getRequestorIndex() gives the number of requestors
+					{		
+						//cout<<"temp queue size is   "<<tempqueue.size()<<endl;
+						cout<<"salam"<<endl;				
+						checkCommand = it->second;
+						cout<<"the command is   "<<checkCommand->busPacketType<<endl;
+						if (roundType == true)
+						{
+							if (checkCommand->busPacketType == RD) 
+							{
+								if(servicebuffer[it->first] == 0)
+								{
+									cout<<"I am here 1111  "<<endl;
+									count_CAS = true;
+									swCAS++ ;
+								}																										
+							}		
+						}
+						else if (roundType == false)
+						{
+							if (checkCommand->busPacketType == WR) 
+							{
+								if(consideredScheduled[it->first] == 1)
+								{
+									if(servicebuffer[it->first] == 0)// instead of using the servicebuffer, shouldn't we use the cosideredScheduled??
+									{
+										cout<<"I am here 22222  "<<endl;
+										count_CAS = true;
+										swCAS++ ; //basically blok the Switching since we are not done with all the things
+									}
+								}														
+							}			
+						}
+					}	
+
+					
+
+					if (!count_CAS)
+					{
+						cout<<"counter is   "<<counter<<endl;
+						cout<<"the round is   "<<roundType<<endl;
+						if (roundType == true)
+						{
+							for(unsigned int num=0; num<tempqueue.size(); num++) // for all requestors from "num". getRequestorIndex() gives the number of requestors	
+							{			
+								checkCommand = tempqueue[num];
+								if (checkCommand->busPacketType == WR) 
+								// RD to WR (Open)
+								{	
+									cout<<"I did switch to WR open"<<endl;
+									for(uint64_t i = 0 ; i < tempqueue.size(); i++)
+									{
+										servicebuffer[i] = 0;
+									}
+									roundType = false; // WR
+									counter = 0; 
+									lastACT = 0;
+									lastCAS = -tCCD;
+									first = true;
+									countFAW = 0;
+									countCAS = 0;
+									jump_1 = true;							
+								}
+							}	
+							if(!jump_1)
+							{
+								for(unsigned int num=0; num<tempqueue.size(); num++) // for all requestors from "num". getRequestorIndex() gives the number of requestors	
+								{			
+									checkCommand = tempqueue[num];
+									if (checkCommand->busPacketType == ACT_W)
+									{	
+										cout<<"I did switch to WR close"<<endl;
+									// RD to WR (Close)	
+										for(uint64_t i = 0 ; i < tempqueue.size(); i++)
+										{
+											servicebuffer[i] = 0;
+										}	
+										roundType = false;
+										counter = 0;
+										lastACT = 0;
+										lastCAS = -tCCD;
+										countFAW = 0;
+										countCAS = 0;
+										jump_2 = true;
+									}
+								}
+							}
+							if (!jump_1)
+							{
+								if(!jump_2)
+								{
+									cout<<"I did reset to RD"<<endl;
+									for (unsigned int k=0; k<tempqueue.size(); k++){
+										cout<<"considered schedule buffer is   "<<endl<<consideredScheduled[k]<<endl;
+									}
+									for (unsigned int k=0; k<tempqueue.size(); k++){
+									cout<<"Before Serviced buffer is   "<<endl<<servicebuffer[k]<<endl;
+									}
+									for(uint64_t i = 0 ; i < tempqueue.size(); i++)
+									{
+										servicebuffer[i] = 0;
+									}	
+									for (unsigned int k=0; k<tempqueue.size(); k++){
+									cout<<"Serviced buffer is   "<<endl<<servicebuffer[k]<<endl;
+									}
+									cout<<"Before lastCAS is "<<lastCAS<<endl;
+									cout<<"Before lastACT is "<<lastACT<<endl;
+									counter = 0;
+									lastACT = 0;
+									lastCAS = -tCCD;
+									swCAS = 0;
+									swACT = 0;
+									cout<<"lastCAS is "<<lastCAS<<endl;
+									cout<<"lastACT is "<<lastACT<<endl;
+									cout<<"Switch CAS is "<<swCAS<<endl;
+									cout<<"Switch ACT is "<<swACT<<endl;
+									countCAS = 0;	
+									countFAW = 0;
+								}
+							}																													
+						}
+						else if (roundType == false )
+						{
+							for(unsigned int num=0; num<tempqueue.size(); num++) // for all requestors from "num". getRequestorIndex() gives the number of requestors	
+							{			
+								checkCommand = tempqueue[num];
+								if (checkCommand->busPacketType == RD) 
+								{	
+									cout<<"I did switch to RD open"<<endl;
+									for(uint64_t i = 0 ; i < tempqueue.size(); i++)
+									{
+										servicebuffer[i] = 0;
+									}
+									roundType = true;
+									counter = 0; 
+									lastACT = 0;
+									lastCAS = -tCCD;
+									first = true;
+									countCAS = 0;	
+									countFAW = 0;
+									jump_1 = true;							
+								}
+							}	
+							if(!jump_1)
+							{
+								for(unsigned int num=0; num<tempqueue.size(); num++) // for all requestors from "num". getRequestorIndex() gives the number of requestors	
+								{			
+									checkCommand = tempqueue[num];
+									if (checkCommand->busPacketType == ACT_R)
+									{						
+										cout<<"I did switch to RD close"<<endl;			
+										for(uint64_t i = 0 ; i < tempqueue.size(); i++)
+										{
+											servicebuffer[i] = 0;
+										}	
+										roundType = true;
+										counter = 0;
+										lastACT = 0;
+										lastCAS = -tCCD;
+										countFAW = 0;
+										jump_2 = true;
+									}
+								}
+							}
+							if (!jump_1)
+							{
+								if(!jump_2)
+								{
+									cout<<"I did reset to WR"<<endl;
+									for(uint64_t i = 0 ; i < 16; i++)
+									{
+										servicebuffer[i] = 0;
+									}	
+									counter = 0;
+									lastACT = 0;
+									lastCAS = -tCCD;
+									countFAW = 0;
+								}
+							}
+						}											
+					}
+					count_CAS = false;
+					cout << "change the count_CAS  to false   "<<endl;																	
+				}
+				else 
+				{
+					cout<<"SW CAS is   "<<swCAS<<endl;
+					cout<<"counter is   "<<counter<<endl;
+					cout<<"I did not switch nor reset   "<<endl;
+				}
+				//cout<<"iteration"<<endl;
+				//cout<<"counter"<<counter;
+				for(unsigned int index = 0; index < tempqueue.size(); index++)
+				{
+					//cout<<"tempques size is"<<tempqueue.size()<<endl ;
+					int RR = Order.at(index);
+					checkCommand = tempqueue[RR];
+
+					if (checkCommand->busPacketType == RD)
+					{
+						//cout<<"iteration"<<endl;
+						if(roundType == true)
+						{
+							if(servicebuffer[RR] == 0)
+							{	
+								//cout<<"considered echeduled  "<<consideredScheduled[RR]<<endl;						
+								if (consideredScheduled[RR] == 0)
+								{
+									//cout<<"HEREEEE"<<endl;
+									consideredScheduled[RR] = 1;
+									if (first)
+									{
+										countCAS++;
+										lastCAS = tWtoR - tCCD;
+										first = false;
+									}
+									else 
+									{
+										countCAS++;
+										lastCAS = lastCAS + tCCD;
+									}	
+								}
+							}	
+						}												
+					checkCommand = NULL;
+					}
+					else if (checkCommand->busPacketType == WR)
+					{
+						if (roundType == false)
+						{
+							if(servicebuffer[RR] == 0)
+							{								
+								if (consideredScheduled[RR] == 0)
+								{
+									
+									consideredScheduled[RR] = 1;
+									if (first)
+									{
+										countCAS++;
+										lastCAS = tRTW - tCCD;
+										first = false;
+									}
+									else 
+									{
+										countCAS++;
+										lastCAS = lastCAS + tCCD;
+									}									
+								}
+							}	
+						}
+					checkCommand = NULL;
+					}
+					else if (checkCommand->busPacketType == ACT_R)
+					{
+						if (!blockACT)
+						{
+							if (roundType == true)
+							{
+								if(servicebuffer[RR] == 0)
+								{
+									if(consideredScheduled[RR] == 0)
+									{
+										for(unsigned int u=0; u<tempqueue.size(); u++)
+										{											
+											int RR1 = Order.at(u);
+											checkCommand_1 = tempqueue[RR1];	
+											if (checkCommand_1->busPacketType == RD)
+											{
+												if(servicebuffer[RR1] == 0)
+												{
+													if (consideredScheduled[RR1] == 0)
+													{
+														
+														consideredScheduled[RR1] = 1;
+														countCAS++;
+														lastCAS = lastCAS + tCCD;	
+													}																									
+												}
+											}													
+										}	
+									}
+									//update ACT
+									
+									consideredScheduled[RR] = 1;
+									countACT++;
+									if (countACT == 0 && countFAW == 0)
+									{
+										lastACT = counter;
+									}
+									else if (countACT == 5)
+									{
+										countFAW++;
+										countACT = 0;
+										lastACT = lastACT + (tFAW - 3*tRRD); 
+									}
+									else
+									{
+										lastACT = lastACT + tRRD;
+									}	
+									//update CAS			
+									lastCAS = std::max(lastACT + tRCD, lastCAS + tCCD);
+								}
+							}
+						}	
+						checkCommand = NULL;
+					}	
+					else if (checkCommand->busPacketType == ACT_W)
+					{
+						if(!blockACT)
+						{
+							if (roundType == false)
+							{
+								if(servicebuffer[RR] == 0)
+								{
+									if(consideredScheduled[RR] == 0)
+									{
+										for(unsigned int u=0; u<tempqueue.size(); u++)
+										{											
+											int RR1 = Order.at(u);
+											checkCommand_1 = tempqueue[RR1];	
+											if (checkCommand_1->busPacketType == WR)
+											{
+												if(servicebuffer[RR1] == 0)
+												{
+													if (consideredScheduled[RR1] == 0)
+													{
+														consideredScheduled[RR1] = 1;
+														countCAS++;
+														lastCAS = lastCAS + tCCD;	
+													}																									
+												}
+											}													
+										}	
+									}
+									//update ACT
+									consideredScheduled[RR] = 1;
+									countACT++;
+										if (countACT == 0 && countFAW == 0)
+									{
+										lastACT = counter;
+									}
+									else if (countACT == 5)
+									{
+										countFAW++;
+										countACT = 0;
+										lastACT = lastACT + (tFAW - 3*tRRD); 
+									}
+									else
+									{
+										lastACT = lastACT + tRRD;
+									}	
+									//update CAS			
+									lastCAS = std::max(lastACT + tRCD, lastCAS + tCCD);	
+								}
+							}
+						}	
+						checkCommand = NULL;
+					}
+					else if (checkCommand->busPacketType == PRE)
+					{
+						if (roundType == true)
+						{
+							//cout<<"HEREEEE"<<endl;
+							if(servicebuffer[RR] == 0)
+							{
+								//cout<<"considered echeduled  "<<consideredScheduled[RR]<<endl;					
+								if(consideredScheduled[RR] == 0) // this is wrong for PRE????
+								{
+									for(unsigned int u = 0; u < tempqueue.size(); u++)
+									{
+										int RR1 = Order.at(u);
+										checkCommand_1 = tempqueue[RR1];	
+										if (checkCommand_1->busPacketType == RD)
+										{
+											//cout<<"HEREEEE"<<endl;
+											if(servicebuffer[RR1] == 0)
+											{
+												if (consideredScheduled[RR1] == 0)
+												{
+													consideredScheduled[RR1] = 1;
+													// for (unsigned int k=0; k<tempqueue.size(); k++){
+													// 	cout<<"considered schedule buffer is   "<<endl<<consideredScheduled[k]<<endl;
+													// }
+													// cout<<"LAST CAS      "<<lastCAS<<endl;
+													// cout<<"tCCD      "<<tCCD<<endl;
+													// countCAS++;
+													// lastCAS = lastCAS + tCCD;	
+													// cout<<"counter CAS  "<<countCAS<<endl;
+													// cout<<"counter ACT  "<<countACT<<endl;
+													// cout<<"LAST ACT      "<<lastACT<<endl;
+													// cout<<"LAST CAS      "<<lastCAS<<endl;
+													// cout<<"Counter      "<<counter<<endl;
+												}																									
+											}
+										}																								
+									}
+									for(unsigned int u = 0; u < tempqueue.size(); u++)
+									{
+										int RR1 = Order.at(u);
+										checkCommand_1 = tempqueue[RR1];	
+										if (checkCommand_1->busPacketType == ACT_R)
+										{
+											if(servicebuffer[RR1] == 0)
+											{
+												//
+												// cout<<"LAST CAS      "<<lastCAS<<endl;
+												// cout<<"tCCD      "<<tCCD<<endl;
+												// countCAS++;
+												// lastCAS = lastCAS + tCCD;	
+												// cout<<"counter CAS  "<<countCAS<<endl;
+												// cout<<"counter ACT  "<<countACT<<endl;
+												// cout<<"LAST ACT      "<<lastACT<<endl;
+												// cout<<"LAST CAS      "<<lastCAS<<endl;
+												// cout<<"Counter      "<<counter<<endl;
+												if(consideredScheduled[RR] == 0)
+												{
+													//update ACT
+													consideredScheduled[RR] = 1;
+													countACT++;
+													if (countACT == 0 && countFAW == 0)
+													{
+														lastACT = counter;
+													}
+													else if (countACT == 5)
+													{
+														countFAW++;
+														countACT = 0;
+														lastACT = lastACT + (tFAW - 3*tRRD); 
+													}
+													else
+													{
+														lastACT = lastACT + tRRD;
+													}	
+													//update CAS			
+													lastCAS = std::max(lastACT + tRCD, lastCAS + tCCD);
+												}																																			
+											}
+										}																								
+									}
+								}		
+							}
+						}
+						else if (roundType == false)
+						{
+							if(servicebuffer[RR] == 0)
+							{
+								if(consideredScheduled[RR] == 0)
+								{
+									for(unsigned int u = 0; u < tempqueue.size(); u++)
+									{
+										// cout<<"LAST CAS      "<<lastCAS<<endl;
+										// cout<<"tCCD      "<<tCCD<<endl;
+										// countCAS++;
+										// lastCAS = lastCAS + tCCD;	
+										// cout<<"counter CAS  "<<countCAS<<endl;
+										// cout<<"counter ACT  "<<countACT<<endl;
+										// cout<<"LAST ACT      "<<lastACT<<endl;
+										// cout<<"LAST CAS      "<<lastCAS<<endl;
+										// cout<<"Counter      "<<counter<<endl;
+										int RR1 = Order.at(u);
+										checkCommand_1 = tempqueue[RR1];	
+										if (checkCommand_1->busPacketType == WR)
+										{
+											if(servicebuffer[RR1] == 0)
+											{
+												if (consideredScheduled[RR1] == 0)
+												{
+													consideredScheduled[RR1] = 1;
+													countCAS++;
+													lastCAS = lastCAS + tCCD;	
+												}																									
+											}
+										}																								
+									}
+									for(unsigned int u = 0; u < tempqueue.size(); u++)
+									{
+										int RR1 = Order.at(u);
+										checkCommand_1 = tempqueue[RR1];	
+										if (checkCommand_1->busPacketType == ACT_W)
+										{
+											if(servicebuffer[RR1] == 0)
+											{
+												if(consideredScheduled[RR] == 0)
+												{
+													//update ACT
+													consideredScheduled[RR] = 1;
+													countACT++;
+													if (countACT == 0 && countFAW == 0)
+													{
+														lastACT = counter;
+													}
+													else if (countACT == 5)
+													{
+														countFAW++;
+														countACT = 0;
+														lastACT = lastACT + (tFAW - 3*tRRD); 
+													}
+													else
+													{
+														lastACT = lastACT + tRRD;
+													}	
+													//update CAS			
+													lastCAS = std::max(lastACT + tRCD, lastCAS + tCCD);
+												}																																			
+											}
+										}																								
+									}
+								}		
+							}
+						}
+					}							
+				}
+				int x = 0;
+				int y = 0; 
+
+				if ((countACT + 1) == 5)
+				{
+					//cout<<"FAW"<<endl;
+					//cout<<"Switch ACT before is   "<<swACT<<endl;
+					x = lastACT + (tFAW - 3*tRRD);
+					y = lastCAS - tRCD;
+					if (x >= y)
+					{
+						swACT = x;
+					}
+					else 
+					{
+						swACT = y;
+					}
+					//swACT = max(lastACT + (tFAW - 3*tRRD), lastCAS - tRCD);
+					//cout<<"Switch ACT after is   "<<swACT<<endl;
+				}
+				else 
+				{
+					//cout<<"Switch ACT before is   "<<swACT<<endl;
+					x = lastACT + tRRD;
+					y = lastCAS - tRCD;
+					if (x >= y)
+					{
+						swACT = x;
+					}
+					else 
+					{
+						swACT = y;
+					}
+					//swACT = std::max(lastACT + tRRD, lastCAS - tRCD);
+					//cout<<"Switch ACT after is   "<<swACT<<endl;
+				}
+				swCAS = lastCAS + tCCD;
+				//cout<<"Switch CAS after is   "<<swCAS<<endl;	
+			
+
+
+				if(!tempqueue.empty())
+				{
+					//cout<<"not empty"<<endl;
+					for(unsigned int index = 0; index < tempqueue.size(); index++)
+					{
+						int RR = Order.at(index);
+						checkCommand = tempqueue[RR];
+						//cout<<"RR  "<<RR<<endl;
+						if (checkCommand->busPacketType == RD)
+						{
+							//cout<<"here  "<<endl;
+							if(roundType == true)
+							{
+								if(servicebuffer[RR] == 0)
+								{
+									if(isIssuable(checkCommand))
+									{								
+										//cmdFIFO.push_back(std::make_pair(checkCommand,RR));
+										//tempqueue.erase(RR);
+										Order.erase(Order.begin() + RR);
+										Order.push_back(RR);
+										servicebuffer[RR] = 1;
+										scheduledCommand = checkCommand;
+										sendCommand(scheduledCommand,0);
+										consideredScheduled[RR] = 0;
+										queuePending[scheduledCommand->requestorID] = false;										
+										counter++;
+										return scheduledCommand;
+									}	
+								}	
+							}												
+						checkCommand = NULL;
+						}
+						else if (checkCommand->busPacketType == WR)
+						{
+							cout<<"iteration WR  "<<endl;
+							if (roundType == false)
+							{
+								if(servicebuffer[RR] == 0)
+								{								
+									if(isIssuable(checkCommand))
+									{								
+										//cmdFIFO.push_back(std::make_pair(checkCommand,RR));
+										//tempqueue.erase(RR);
+										Order.erase(Order.begin() + RR);
+										Order.push_back(RR);
+										servicebuffer[RR] = 1;
+										scheduledCommand = checkCommand;
+										sendCommand(scheduledCommand,0);
+										consideredScheduled[RR] = 0;
+										queuePending[scheduledCommand->requestorID] = false;										
+										counter++;
+										return scheduledCommand;
+									}
+								}	
+							}
+						checkCommand = NULL;
+						}
+						else if (checkCommand->busPacketType == ACT_R)
+						{
+							cout<<"iteration  ACT_R"<<endl;
+							if (roundType == true)
+							{
+								if(servicebuffer[RR] == 0)
+								{
+									for(unsigned int u=0; u<tempqueue.size(); u++)
+									{											
+										int RR1 = Order.at(u);
+										checkCommand_1 = tempqueue[RR1];	
+										if (checkCommand_1->busPacketType == RD)
+										{
+											if(servicebuffer[RR1] == 0)
+											{
+												if(isIssuable(checkCommand_1))
+												{
+													Order.erase(Order.begin() + RR1);
+													Order.push_back(RR1);
+													servicebuffer[RR1] = 1;
+													scheduledCommand = checkCommand_1;
+													sendCommand(scheduledCommand,0);
+													consideredScheduled[RR1] = 0;
+													queuePending[scheduledCommand->requestorID] = false;		
+													//lastACT++; // Bus Conflict
+													//lastCAS++; // Bus Conflict								
+													counter++;
+													return scheduledCommand;	
+												}																									
+											}
+										}													
+									}																					
+									if(isIssuable(checkCommand))
+									{
+										scheduledCommand = checkCommand;
+										sendCommand(scheduledCommand,0);
+										consideredScheduled[RR] = 0;
+										queuePending[scheduledCommand->requestorID] = false;										
+										counter++;
+										return scheduledCommand;								
+										//tempqueue.erase(RR);	
+									}																																				
+								}
+							checkCommand = NULL;
+							}
+						}	
+						else if (checkCommand->busPacketType == ACT_W)
+						{
+							cout<<"iteration  ACTW"<<endl;
+							if(!blockACT)
+							{
+								if (roundType == false)
+								{
+									if(servicebuffer[RR] == 0)
+									{
+										for(unsigned int u = 0; u < tempqueue.size(); u++)
+										{
+											int RR1 = Order.at(u);
+											checkCommand_1 = tempqueue[RR1];	
+											if (checkCommand_1->busPacketType == WR)
+											{
+												if(servicebuffer[RR1] == 0)
+												{
+													if(isIssuable(checkCommand_1))
+													{
+														Order.erase(Order.begin() + RR1);
+														Order.push_back(RR1);
+														servicebuffer[RR1] = 1;
+														scheduledCommand = checkCommand_1;
+														sendCommand(scheduledCommand,0);
+														consideredScheduled[RR1] = 0;
+														queuePending[scheduledCommand->requestorID] = false;	
+														//lastACT++; // Bus Conflict
+														//lastCAS++; // Bus Conflict									
+														counter++;
+														return scheduledCommand;	
+													}																								
+												}
+											}																								
+										}
+										if (isIssuable(checkCommand))
+										{
+											scheduledCommand = checkCommand;
+											sendCommand(scheduledCommand,0);
+											consideredScheduled[RR] = 0;
+											queuePending[scheduledCommand->requestorID] = false;										
+											counter++;
+											return scheduledCommand;	
+										}	
+									}
+								}
+							}	
+							checkCommand = NULL;
+						}
+						else if (checkCommand->busPacketType == PRE)
+						{
+							cout<<"iteration  PRE"<<endl;
+							cout<<"counter is    "<<counter<<endl;
+							cout<<"Switch CAS is    "<<swCAS<<endl;
+							if (roundType == true)
+							{
+								for(unsigned int u = 0; u < tempqueue.size(); u++)
+								{
+									int RR1 = Order.at(u);
+									checkCommand_1 = tempqueue[RR1];	
+									if (checkCommand_1->busPacketType == RD)
+									{
+										if(servicebuffer[RR1] == 0)
+										{
+											//cout<<"iteration  "<<endl;
+											//cout<<"the check command RR1 is   "<<RR1<<endl;
+											if(isIssuable(checkCommand_1))
+											{
+												cout<<"issueable PRE  "<<endl;
+												// cout<<"Order Size     "<<Order.size()<<endl;
+												// for (unsigned int u = 0 ; u < Order.size(); u++)
+												// {
+												// 	cout<<"The order of The RR before manipulating is:  "<<Order[u]<<endl;
+												// }							
+												Order.erase(Order.begin() + RR1);
+												// for (unsigned int u = 0 ; u < Order.size(); u++)
+												// {
+												// 	cout<<endl<<"The order of The RR before manipulating is:  "<<Order[u]<<endl;
+												// }
+												Order.push_back(RR1);
+												// for (unsigned int u = 0 ; u < Order.size(); u++)
+												// {
+												// 	cout<<endl<<"The order of The RR before manipulating is:  "<<Order[u]<<endl;
+												// }
+												scheduledCommand = checkCommand_1;
+												//cout<<"what is the command   issued  "<<scheduledCommand->busPacketType<<endl;						
+												sendCommand(scheduledCommand,0); //Should be 0 because of the 1 command level??
+												tempqueue.erase(RR1);
+												//tempqueue[RR1] = NUL;
+												// cout<< "Was it sent    "<<endl;
+												// for (unsigned int k=0; k<tempqueue.size(); k++){
+												// 	cout<<" BEFORE considered schedule buffer is   "<<endl<<consideredScheduled[k]<<endl;
+												// }
+												// for (unsigned int k=0; k<tempqueue.size(); k++){
+												// 	cout<<"BEFORE Serviced buffer is   "<<endl<<servicebuffer[k]<<endl;
+												// }
+												servicebuffer[RR1] = 1;
+												consideredScheduled[RR1] = 0;
+												// for (unsigned int k=0; k<tempqueue.size(); k++){
+												// 	cout<<"considered schedule buffer is   "<<endl<<consideredScheduled[k]<<endl;
+												// }
+												// for (unsigned int k=0; k<tempqueue.size(); k++){
+												// 	cout<<"Serviced buffer is   "<<endl<<servicebuffer[k]<<endl;
+												// }
+												queuePending[scheduledCommand->requestorID] = false;
+												//lastACT++; // Bus Conflict
+												//lastCAS++; // Bus Conflict											
+												//cout<<"counter is   "<<counter<<endl;
+												counter++;
+												//cout<<"counter after is  "<<counter<<endl;
+												return scheduledCommand;	
+											}																								
+										}
+									}																								
+								}
+								for(unsigned int u = 0; u < tempqueue.size(); u++)
+								{
+									int RR1 = Order.at(u);
+									checkCommand_1 = tempqueue[RR1];	
+									if (checkCommand_1->busPacketType == ACT_R)
+									{
+										if(servicebuffer[RR1] == 0)
+										{
+											if(isIssuable(checkCommand_1))
+											{
+												scheduledCommand = checkCommand;
+												sendCommand(scheduledCommand,0);
+												consideredScheduled[RR1] = 0;
+												queuePending[scheduledCommand->requestorID] = false;	
+												//lastACT++; // Bus Conflict
+												//lastCAS++; // Bus Conflict									
+												counter++;
+												return scheduledCommand;		
+											}																								
+										}
+									}																								
+								}
+								if(isIssuable(checkCommand))
+								{
+									//tempqueue.erase(RR);
+									scheduledCommand = checkCommand;
+									sendCommand(scheduledCommand,0);
+									consideredScheduled[RR] = 0;
+									queuePending[scheduledCommand->requestorID] = false;										
+									counter++;
+									return scheduledCommand;
+								}								
+							}
+							else if (roundType == false)
+							{
+								if(servicebuffer[RR] == 0)
+								{
+									for(unsigned int u = 0; u < tempqueue.size(); u++)
+									{
+										int RR1 = Order.at(u);
+										checkCommand_1 = tempqueue[RR1];	
+										if (checkCommand_1->busPacketType == WR)
+										{
+											if(servicebuffer[RR1] == 0)
+											{
+												if(isIssuable(checkCommand_1))
+												{
+													Order.erase(Order.begin() + RR1);
+													Order.push_back(RR1);												
+													scheduledCommand = checkCommand_1;
+													sendCommand(scheduledCommand,0);
+													servicebuffer[RR1] = 1;
+													consideredScheduled[RR1] = 0;
+													queuePending[scheduledCommand->requestorID] = false;
+													//lastACT++; // Bus Conflict
+													//lastCAS++; // Bus Conflict											
+													counter++;
+													return scheduledCommand;											
+												}																								
+											}
+										}																								
+									}
+									for(unsigned int u = 0; u < tempqueue.size(); u++)
+									{
+										int RR1 = Order.at(u);
+										checkCommand_1 = tempqueue[RR1];	
+										if (checkCommand_1->busPacketType == ACT_W)
+										{
+											if(servicebuffer[RR1] == 0)
+											{
+												if(isIssuable(checkCommand_1))
+												{
+													scheduledCommand = checkCommand;
+													sendCommand(scheduledCommand,0);
+													consideredScheduled[RR1] = 0;
+													queuePending[scheduledCommand->requestorID] = false;	
+													//lastACT++; // Bus Conflict
+													//lastCAS++; // Bus Conflict										
+													counter++;
+													return scheduledCommand;		
+												}																								
+											}
+										}																								
+									}
+									if(isIssuable(checkCommand))
+									{
+										//tempqueue.erase(RR);
+										scheduledCommand = checkCommand;
+										sendCommand(scheduledCommand,0);
+										consideredScheduled[RR] = 0;
+										queuePending[scheduledCommand->requestorID] = false;										
+										counter++;
+										return scheduledCommand;
+									}
+								}
+							}																					
+						}
+						else if (checkCommand->busPacketType == NULL)
+						{
+							 cout<<"iteration  Null"<<endl;
+							// cout<<"counter is    "<<counter<<endl;
+							// cout<<"Switch CAS is    "<<swCAS<<endl;
+							if (roundType == true)
+							{
+								for(unsigned int u = 0; u < tempqueue.size(); u++)
+								{
+									int RR1 = Order.at(u);
+									checkCommand_1 = tempqueue[RR1];	
+									if (checkCommand_1->busPacketType == RD)
+									{
+										if(servicebuffer[RR1] == 0)
+										{
+											//cout<<"iteration  "<<endl;
+											//cout<<"the check command RR1 is   "<<RR1<<endl;
+											if(isIssuable(checkCommand_1))
+											{
+												cout<<"issueable PRE  "<<endl;
+												// cout<<"Order Size     "<<Order.size()<<endl;
+												// for (unsigned int u = 0 ; u < Order.size(); u++)
+												// {
+												// 	cout<<"The order of The RR before manipulating is:  "<<Order[u]<<endl;
+												// }							
+												Order.erase(Order.begin() + RR1);
+												// for (unsigned int u = 0 ; u < Order.size(); u++)
+												// {
+												// 	cout<<endl<<"The order of The RR before manipulating is:  "<<Order[u]<<endl;
+												// }
+												Order.push_back(RR1);
+												// for (unsigned int u = 0 ; u < Order.size(); u++)
+												// {
+												// 	cout<<endl<<"The order of The RR before manipulating is:  "<<Order[u]<<endl;
+												// }
+												scheduledCommand = checkCommand_1;
+												//cout<<"what is the command   issued  "<<scheduledCommand->busPacketType<<endl;						
+												sendCommand(scheduledCommand,0); //Should be 0 because of the 1 command level??
+												//tempqueue.erase(RR1);
+												tempqueue[RR1] = NULL;
+												// cout<< "Was it sent    "<<endl;
+												// for (unsigned int k=0; k<tempqueue.size(); k++){
+												// 	cout<<" BEFORE considered schedule buffer is   "<<endl<<consideredScheduled[k]<<endl;
+												// }
+												// for (unsigned int k=0; k<tempqueue.size(); k++){
+												// 	cout<<"BEFORE Serviced buffer is   "<<endl<<servicebuffer[k]<<endl;
+												// }
+												servicebuffer[RR1] = 1;
+												consideredScheduled[RR1] = 0;
+												// for (unsigned int k=0; k<tempqueue.size(); k++){
+												// 	cout<<"considered schedule buffer is   "<<endl<<consideredScheduled[k]<<endl;
+												// }
+												// for (unsigned int k=0; k<tempqueue.size(); k++){
+												// 	cout<<"Serviced buffer is   "<<endl<<servicebuffer[k]<<endl;
+												// }
+												queuePending[scheduledCommand->requestorID] = false;
+												//lastACT++; // Bus Conflict
+												//lastCAS++; // Bus Conflict											
+												//cout<<"counter is   "<<counter<<endl;
+												counter++;
+												//cout<<"counter after is  "<<counter<<endl;
+												return scheduledCommand;	
+											}																								
+										}
+									}																								
+								}
+								for(unsigned int u = 0; u < tempqueue.size(); u++)
+								{
+									int RR1 = Order.at(u);
+									checkCommand_1 = tempqueue[RR1];	
+									if (checkCommand_1->busPacketType == ACT_R)
+									{
+										if(servicebuffer[RR1] == 0)
+										{
+											if(isIssuable(checkCommand_1))
+											{
+												scheduledCommand = checkCommand;
+												sendCommand(scheduledCommand,0);
+												consideredScheduled[RR1] = 0;
+												queuePending[scheduledCommand->requestorID] = false;	
+												//lastACT++; // Bus Conflict
+												//lastCAS++; // Bus Conflict									
+												counter++;
+												return scheduledCommand;		
+											}																								
+										}
+									}																								
+								}																																															
+								counter++;
+								return NULL;																
+							}
+							else if (roundType == false)
+							{
+								if(servicebuffer[RR] == 0)
+								{
+									for(unsigned int u = 0; u < tempqueue.size(); u++)
+									{
+										int RR1 = Order.at(u);
+										checkCommand_1 = tempqueue[RR1];	
+										if (checkCommand_1->busPacketType == WR)
+										{
+											if(servicebuffer[RR1] == 0)
+											{
+												if(isIssuable(checkCommand_1))
+												{
+													Order.erase(Order.begin() + RR1);
+													Order.push_back(RR1);												
+													scheduledCommand = checkCommand_1;
+													sendCommand(scheduledCommand,0);
+													servicebuffer[RR1] = 1;
+													consideredScheduled[RR1] = 0;
+													queuePending[scheduledCommand->requestorID] = false;
+													//lastACT++; // Bus Conflict
+													//lastCAS++; // Bus Conflict											
+													counter++;
+													return scheduledCommand;											
+												}																								
+											}
+										}																								
+									}
+									for(unsigned int u = 0; u < tempqueue.size(); u++)
+									{
+										int RR1 = Order.at(u);
+										checkCommand_1 = tempqueue[RR1];	
+										if (checkCommand_1->busPacketType == ACT_W)
+										{
+											if(servicebuffer[RR1] == 0)
+											{
+												if(isIssuable(checkCommand_1))
+												{
+													scheduledCommand = checkCommand;
+													sendCommand(scheduledCommand,0);
+													consideredScheduled[RR1] = 0;
+													queuePending[scheduledCommand->requestorID] = false;	
+													//lastACT++; // Bus Conflict
+													//lastCAS++; // Bus Conflict										
+													counter++;
+													return scheduledCommand;		
+												}																								
+											}
+										}																								
+									}																
+									counter++;
+									return NULL;									
+								}
+							}																					
+						}							
+					}
+
+					//if there is nothing ready in the Q, we can simply issue the opportunistically
+
+					for(unsigned int index = 0; index < tempqueue.size(); index++)
+					{				
+						int RR = Order.at(index);
+						checkCommand = tempqueue[RR];
+						if (checkCommand->busPacketType == RD)
+						{
+							if (roundType == true)
+							{
+								if(servicebuffer[RR] == 1)
+								{
+									if(isIssuable(checkCommand))
+									{
+										//tempqueue.erase(RR);
+										Order.erase(Order.begin() + RR);
+										Order.push_back(RR);
+										//lastCAS = lastCAS + tCCD;	
+										scheduledCommand = checkCommand;
+										sendCommand(scheduledCommand,RR);
+										consideredScheduled[RR] = 0;
+										queuePending[scheduledCommand->requestorID] = false;										
+										counter++;
+										return scheduledCommand;
+									}															
+								}
+							}
+						checkCommand = NULL;
+						}
+						else if (checkCommand->busPacketType == WR)
+						{
+							if (roundType == false)
+							{
+								if(servicebuffer[RR] == 1)
+								{
+									if(isIssuable(checkCommand))
+									{
+										//tempqueue.erase(RR);
+										Order.erase(Order.begin() + RR);
+										Order.push_back(RR);
+										//lastCAS = lastCAS + tCCD;	
+										scheduledCommand = checkCommand;
+										sendCommand(scheduledCommand,RR);
+										consideredScheduled[RR] = 0;
+										queuePending[scheduledCommand->requestorID] = false;										
+										counter++;
+										return scheduledCommand;
+									}																
+								}
+							}
+						checkCommand = NULL;
+						}					
+					}
+				}			
+			counter++;
+			return NULL;		
+			}		
+		};	
+	}
